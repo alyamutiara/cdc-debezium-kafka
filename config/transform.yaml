@@ -1,0 +1,31 @@
+source_topics:
+  - cdc.source.orders
+  - cdc.source.customers
+  - cdc.source.products
+  - cdc.source.order_items
+
+output_topic_prefix: cdc.transformed
+
+transforms:
+  orders:
+    column_map:
+      id: order_id
+      customer_id: cust_id
+    drop_columns:
+      - internal_notes
+    filters:
+      - field: status
+        op: "="
+        value: "deleted"
+  customers:
+    drop_columns:
+      - password_hash
+      - ssn
+    column_map:
+      id: customer_id
+  products:
+    drop_columns:
+      - internal_notes
+  order_items:
+    column_map:
+      id: item_id

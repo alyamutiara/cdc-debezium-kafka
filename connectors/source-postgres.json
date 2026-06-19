@@ -1,0 +1,29 @@
+{
+  "name": "postgres-source-connector",
+  "config": {
+    "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+    "tasks.max": "1",
+    "database.hostname": "postgres-source",
+    "database.port": "5432",
+    "database.user": "source",
+    "database.password": "source",
+    "database.dbname": "ecommerce",
+    "database.server.name": "cdc",
+    "topic.prefix": "cdc.source",
+    "plugin.name": "pgoutput",
+    "slot.name": "debezium_source_slot",
+    "publication.name": "debezium_source_pub",
+    "publication.autocreate.mode": "filtered",
+    "snapshot.mode": "initial",
+    "tombstones.on.delete": "true",
+    "decimal.handling.mode": "double",
+    "time.precision.mode": "connect",
+    "include.schema.changes": "true",
+    "schema.history.internal.kafka.topic": "cdc.schema.history",
+    "schema.history.internal.kafka.bootstrap.servers": "kafka:9092",
+    "transforms": "route",
+    "transforms.route.type": "org.apache.kafka.connect.transforms.RegexRouter",
+    "transforms.route.regex": "([^.]+)\\.([^.]+)\\.([^.]+)",
+    "transforms.route.replacement": "cdc.source.$3"
+  }
+}

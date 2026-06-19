@@ -1,0 +1,204 @@
+name: cdc-pipeline
+
+services:
+  postgres-source:
+    image: postgres:15-alpine
+    container_name: cdc-postgres-source
+    environment:
+      POSTGRES_DB: ecommerce
+      POSTGRES_USER: source
+      POSTGRES_PASSWORD: source
+    volumes:
+      - postgres-source-data:/var/lib/postgresql/data
+      - ./sql/source/01_schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U source -d ecommerce"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    command: >
+      postgres
+        -c wal_level=logical
+        -c max_replication_slots=4
+        -c max_wal_senders=4
+    restart: unless-stopped
+
+  postgres-target:
+    image: postgres:15-alpine
+    container_name: cdc-postgres-target
+    environment:
+      POSTGRES_DB: analytics
+      POSTGRES_USER: target
+      POSTGRES_PASSWORD: target
+    volumes:
+      - postgres-target-data:/var/lib/postgresql/data
+    ports:
+      - "5434:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U target -d analytics"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
+  kafka:
+    image: confluentinc/cp-kafka:7.6.0
+    container_name: cdc-kafka
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    ports:
+      - "9092:9092"
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-broker-api-versions --bootstrap-server localhost:9092 >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 10s
+      retries: 20
+      start_period: 15s
+    restart: unless-stopped
+
+  schema-registry:
+    image: apicurio/apicurio-registry-mem:2.5.12.Final
+    container_name: cdc-schema-registry
+    environment:
+      QUARKUS_PROFILE: mem
+    ports:
+      - "8081:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/apis/registry/v2/system/info >/dev/null 2>&1 || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
+    restart: unless-stopped
+
+  debezium-connect:
+    image: debezium/connect:2.6.2.Final
+    container_name: cdc-debezium-connect
+    depends_on:
+      kafka:
+        condition: service_healthy
+      schema-registry:
+        condition: service_healthy
+      postgres-source:
+        condition: service_healthy
+    environment:
+      BOOTSTRAP_SERVERS: kafka:9092
+      GROUP_ID: 1
+      CONFIG_STORAGE_TOPIC: cdc_connect_configs
+      OFFSET_STORAGE_TOPIC: cdc_connect_offsets
+      STATUS_STORAGE_TOPIC: cdc_connect_status
+      CONFIG_STORAGE_REPLICATION_FACTOR: 1
+      OFFSET_STORAGE_REPLICATION_FACTOR: 1
+      STATUS_STORAGE_REPLICATION_FACTOR: 1
+      KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      INTERNAL_KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      INTERNAL_VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      CONNECT_REST_ADVERTISED_HOST_NAME: debezium-connect
+      CONNECT_REST_PORT: 8083
+      ENABLE_DEBEZIUM_SCRIPTING: "true"
+    ports:
+      - "8083:8083"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8083/connectors >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+    restart: unless-stopped
+
+  transform-service:
+    build:
+      context: .
+      dockerfile: Dockerfile.transform
+    container_name: cdc-transform-service
+    depends_on:
+      kafka:
+        condition: service_healthy
+      debezium-connect:
+        condition: service_healthy
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_CONSUMER_GROUP: cdc-transform-service
+      TRANSFORM_CONFIG_PATH: /config/transform.yaml
+      METRICS_HOST: 0.0.0.0
+      METRICS_PORT: "8000"
+    volumes:
+      - ./config/transform.yaml:/config/transform.yaml:ro
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=2)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    restart: unless-stopped
+
+  data-generator:
+    build:
+      context: .
+      dockerfile: Dockerfile.data-generator
+    container_name: cdc-data-generator
+    depends_on:
+      postgres-source:
+        condition: service_healthy
+    environment:
+      PG_HOST: postgres-source
+      PG_PORT: "5432"
+      PG_DB: ecommerce
+      PG_USER: source
+      PG_PASSWORD: source
+      INSERT_INTERVAL_SECONDS: "2"
+      UPDATE_INTERVAL_SECONDS: "10"
+      DELETE_INTERVAL_SECONDS: "60"
+    restart: unless-stopped
+
+  setup:
+    image: alpine:3.20
+    container_name: cdc-setup
+    depends_on:
+      debezium-connect:
+        condition: service_healthy
+    volumes:
+      - ./connectors:/connectors:ro
+      - ./setup/register-connectors.sh:/register-connectors.sh:ro
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["apk add --no-cache curl bash >/dev/null && bash /register-connectors.sh"]
+    restart: "no"
+
+  health-check-sidecar:
+    image: alpine:3.20
+    container_name: cdc-health-check
+    depends_on:
+      setup:
+        condition: service_completed_successfully
+    volumes:
+      - ./setup/health-check.sh:/health-check.sh:ro
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["apk add --no-cache curl bash >/dev/null && bash /health-check.sh"]
+    restart: unless-stopped
+
+volumes:
+  postgres-source-data:
+  postgres-target-data:
+  kafka-data:

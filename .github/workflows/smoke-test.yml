@@ -1,0 +1,110 @@
+name: smoke-test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    name: Lint + type check + unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Lint with ruff
+        run: ruff check src/transform/ tests/
+
+      - name: Type check with mypy
+        run: mypy src/transform/ --ignore-missing-imports
+
+      - name: Unit tests
+        run: pytest tests/ --ignore=tests/test_e2e.py --ignore=tests/test_ddl_e2e.py --ignore=tests/test_restart.py --ignore=tests/test_health_check.py
+
+  smoke:
+    name: docker compose smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Bring up the stack
+        run: docker compose up -d
+
+      - name: Wait for services to be healthy
+        run: |
+          for i in $(seq 1 60); do
+            if curl -fsS http://localhost:8083/connectors >/dev/null 2>&1 \
+               && curl -fsS http://localhost:8000/health >/dev/null 2>&1; then
+              echo "services healthy"
+              exit 0
+            fi
+            echo "waiting for services... ($i/60)"
+            sleep 5
+          done
+          echo "services did not become healthy in time"
+          docker compose logs --tail=200
+          exit 1
+
+      - name: Insert a row and verify it lands in target
+        run: |
+          sleep 30  # let snapshot complete + first events flow
+          docker exec cdc-postgres-source psql -U source -d ecommerce -c \
+            "INSERT INTO orders (customer_id, status, total_cents, internal_notes) \
+             SELECT id, 'pending', 1234, 'smoke-test' FROM customers LIMIT 1 RETURNING id;"
+
+          found=0
+          for i in $(seq 1 30); do
+            count=$(docker exec cdc-postgres-target psql -U target -d analytics -t -c \
+              "SELECT COUNT(*) FROM public.orders WHERE total_cents = 1234")
+            if [ "$count" -gt 0 ]; then
+              echo "row landed in target (count=$count)"
+              found=1
+              break
+            fi
+            echo "waiting for row to land... ($i/30)"
+            sleep 2
+          done
+          if [ "$found" -ne 1 ]; then
+            echo "row did not land in target"
+            docker compose logs --tail=200
+            exit 1
+          fi
+
+      - name: Verify transform applied (column rename)
+        run: |
+          count=$(docker exec cdc-postgres-target psql -U target -d analytics -t -c \
+            "SELECT COUNT(*) FROM information_schema.columns \
+             WHERE table_schema='public' AND table_name='orders' AND column_name='order_id'")
+          if [ "$count" -lt 1 ]; then
+            echo "expected order_id column (renamed from id) not found in target"
+            docker compose logs --tail=200
+            exit 1
+          fi
+          echo "column rename applied (order_id present)"
+
+      - name: Verify transform applied (column drop)
+        run: |
+          count=$(docker exec cdc-postgres-target psql -U target -d analytics -t -c \
+            "SELECT COUNT(*) FROM information_schema.columns \
+             WHERE table_schema='public' AND table_name='orders' AND column_name='internal_notes'")
+          if [ "$count" -ne 0 ]; then
+            echo "internal_notes should be dropped in target, found $count columns"
+            docker compose logs --tail=200
+            exit 1
+          fi
+          echo "column drop applied (internal_notes absent)"
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
