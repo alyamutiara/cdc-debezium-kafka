@@ -4,6 +4,8 @@ WORKDIR /app
 
 RUN pip install --no-cache-dir "psycopg[binary]>=3.2.0"
 
+ENV INTERACTIVE=true
+
 COPY src/data_generator/main.py /app/main.py
 
 CMD ["python", "/app/main.py"]

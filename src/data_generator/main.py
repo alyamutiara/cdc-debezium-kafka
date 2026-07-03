@@ -12,7 +12,7 @@ import logging
 import os
 import random
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 
 import psycopg
 from psycopg import errors as pg_errors
@@ -28,6 +28,8 @@ PG_PORT = int(os.environ["PG_PORT"])
 PG_DB = os.environ["PG_DB"]
 PG_USER = os.environ["PG_USER"]
 PG_PASSWORD = os.environ["PG_PASSWORD"]
+
+INTERACTIVE = os.environ.get("INTERACTIVE", "").lower() in ("1", "true", "yes")
 
 INSERT_INTERVAL = float(os.environ.get("INSERT_INTERVAL_SECONDS", "2"))
 UPDATE_INTERVAL = float(os.environ.get("UPDATE_INTERVAL_SECONDS", "10"))
@@ -133,7 +135,7 @@ def connect_with_retry(retries: int = 30, delay: float = 2.0) -> psycopg.Connect
 
 
 def _ts() -> str:
-    return datetime.now(datetime.UTC).isoformat()
+    return datetime.now(timezone.utc).isoformat()
 
 
 def seed_products(conn: psycopg.Connection, state: State) -> None:
@@ -164,13 +166,14 @@ def seed_customers(conn: psycopg.Connection, state: State) -> None:
         email = f"{first.lower()}.{last.lower()}{i}@{domain}"
         full_name = f"{first} {last}"
         pw_hash = f"$2b$12$seed{i:04d}"
+        ssn = f"{random.randint(100, 999)}-{random.randint(10, 99)}-{random.randint(1000, 9999)}"
         try:
             with conn.cursor() as cur:
                 cur.execute(
                     "INSERT INTO customers (email, full_name, password_hash, ssn, created_at) "
                     "VALUES (%s, %s, %s, %s, %s) ON CONFLICT (email) DO NOTHING "
                     "RETURNING id",
-                    (email, full_name, pw_hash, None, _ts()),
+                    (email, full_name, pw_hash, ssn, _ts()),
                 )
                 row = cur.fetchone()
                 if row is not None:
@@ -188,12 +191,13 @@ def insert_customer(conn: psycopg.Connection, state: State) -> None:
     email = f"{first.lower()}.{last.lower()}{idx}@{domain}"
     full_name = f"{first} {last}"
     pw_hash = f"$2b$12$gen{idx:06d}"
+    ssn = f"{random.randint(100, 999)}-{random.randint(10, 99)}-{random.randint(1000, 9999)}"
     try:
         with conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO customers (email, full_name, password_hash, ssn, created_at) "
                 "VALUES (%s, %s, %s, %s, %s) RETURNING id",
-                (email, full_name, pw_hash, None, _ts()),
+                (email, full_name, pw_hash, ssn, _ts()),
             )
             cid = cur.fetchone()[0]
             state.customer_ids.append(cid)
@@ -308,7 +312,7 @@ def update_order_status(conn: psycopg.Connection, state: State) -> None:
             cur.execute(
                 "UPDATE orders SET status = %s, internal_notes = %s, created_at = %s "
                 "WHERE id = %s RETURNING status",
-                (new_status, f"status changed at {ts}", ts),
+                (new_status, f"status changed at {ts}", ts, order_id),
             )
             updated = cur.fetchone()
             if updated is not None:
@@ -322,8 +326,8 @@ def cancel_order(conn: psycopg.Connection, state: State) -> None:
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT id FROM orders WHERE status IN %s ORDER BY created_at ASC LIMIT 1",
-                (tuple(CANCELLABLE),),
+                "SELECT id FROM orders WHERE status = ANY(%s) ORDER BY created_at ASC LIMIT 1",
+                (list(CANCELLABLE),),
             )
             row = cur.fetchone()
             if row is None:
@@ -438,6 +442,142 @@ def print_stats(state: State) -> None:
     )
 
 
+def _do_insert(conn: psycopg.Connection, state: State) -> None:
+    roll = random.random()
+    if roll < 0.70:
+        insert_order(conn, state)
+    elif roll < 0.82:
+        insert_customer(conn, state)
+    elif roll < 0.90:
+        insert_product(conn, state)
+    else:
+        update_customer(conn, state)
+        update_product_price(conn, state)
+
+
+def _do_update(conn: psycopg.Connection, state: State) -> None:
+    roll = random.random()
+    if roll < 0.65:
+        update_order_status(conn, state)
+    elif roll < 0.85:
+        cancel_order(conn, state)
+    else:
+        update_product_price(conn, state)
+
+
+def interactive_loop(conn: psycopg.Connection, state: State) -> None:
+    help_text = """\
+----------------------------------------
+ i / I   trigger INSERT (random)
+ u / U   trigger UPDATE (random)
+ d / D   trigger DELETE (cancelled order)
+ a / A   switch to AUTO mode (Ctrl+C to return)
+ s / S   print stats
+ p / P   set intervals (insert/update/delete secs)
+ q / Q   quit
+ h / ?   this help
+----------------------------------------"""
+
+    print(help_text)
+
+    while True:
+        try:
+            cmd = input("> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+
+        if not cmd:
+            continue
+
+        ch = cmd[0].lower()
+
+        if ch == "q":
+            print("bye.")
+            break
+        elif ch == "h" or ch == "?":
+            print(help_text)
+        elif ch == "s":
+            print_stats(state)
+        elif ch == "i":
+            _do_insert(conn, state)
+        elif ch == "u":
+            _do_update(conn, state)
+        elif ch == "d":
+            delete_order(conn, state)
+        elif ch == "a":
+            print("entering auto mode (Ctrl+C to return to interactive)...")
+            auto_loop(conn, state)
+            print("back to interactive.")
+            print(help_text)
+        elif ch == "p":
+            _set_intervals(cmd)
+        else:
+            print(f"unknown: {cmd!r}  (h for help)")
+
+
+def _set_intervals(cmd: str) -> None:
+    global INSERT_INTERVAL, UPDATE_INTERVAL, DELETE_INTERVAL
+    parts = cmd.split()
+    if len(parts) >= 4:
+        try:
+            INSERT_INTERVAL = float(parts[1])
+            UPDATE_INTERVAL = float(parts[2])
+            DELETE_INTERVAL = float(parts[3])
+        except ValueError:
+            print("p <insert_sec> <update_sec> <delete_sec>  e.g.  p 2 10 60")
+            return
+    else:
+        print(
+            "current: insert=%.1fs  update=%.1fs  delete=%.1fs"
+            % (INSERT_INTERVAL, UPDATE_INTERVAL, DELETE_INTERVAL),
+        )
+        print("usage: p <insert_sec> <update_sec> <delete_sec>  e.g.  p 2 10 60")
+        return
+    print(
+        "updated: insert=%.1fs  update=%.1fs  delete=%.1fs"
+        % (INSERT_INTERVAL, UPDATE_INTERVAL, DELETE_INTERVAL),
+    )
+
+
+def auto_loop(conn: psycopg.Connection, state: State) -> None:
+    last_insert = time.monotonic()
+    last_update = last_insert
+    last_delete = last_insert
+    last_stat = last_insert
+    cycle = 0
+
+    log.info(
+        "auto mode (insert=%.1fs update=%.1fs delete=%.1fs) — Ctrl+C to stop",
+        INSERT_INTERVAL, UPDATE_INTERVAL, DELETE_INTERVAL,
+    )
+
+    try:
+        while True:
+            now = time.monotonic()
+
+            if now - last_insert >= INSERT_INTERVAL:
+                _do_insert(conn, state)
+                last_insert = now
+
+            if now - last_update >= UPDATE_INTERVAL:
+                _do_update(conn, state)
+                last_update = now
+
+            if now - last_delete >= DELETE_INTERVAL:
+                delete_order(conn, state)
+                last_delete = now
+
+            if now - last_stat >= 30.0:
+                print_stats(state)
+                last_stat = now
+
+            cycle += 1
+            time.sleep(0.5)
+    except KeyboardInterrupt:
+        pass
+
+
 def main() -> None:
     conn = connect_with_retry()
     state = State()
@@ -449,53 +589,11 @@ def main() -> None:
         "seeded %d customers, %d products", len(state.customer_ids), len(state.product_ids),
     )
 
-    last_insert = 0.0
-    last_update = 0.0
-    last_delete = 0.0
-    last_stat = 0.0
-    cycle = 0
-
-    log.info(
-        "starting generator (insert=%.1fs update=%.1fs delete=%.1fs)",
-        INSERT_INTERVAL, UPDATE_INTERVAL, DELETE_INTERVAL,
-    )
-
-    while True:
-        now = time.monotonic()
-
-        if now - last_insert >= INSERT_INTERVAL:
-            roll = random.random()
-            if roll < 0.70:
-                insert_order(conn, state)
-            elif roll < 0.82:
-                insert_customer(conn, state)
-            elif roll < 0.90:
-                insert_product(conn, state)
-            else:
-                update_customer(conn, state)
-                update_product_price(conn, state)
-            last_insert = now
-
-        if now - last_update >= UPDATE_INTERVAL:
-            roll = random.random()
-            if roll < 0.65:
-                update_order_status(conn, state)
-            elif roll < 0.85:
-                cancel_order(conn, state)
-            else:
-                update_product_price(conn, state)
-            last_update = now
-
-        if now - last_delete >= DELETE_INTERVAL:
-            delete_order(conn, state)
-            last_delete = now
-
-        if now - last_stat >= 30.0:
-            print_stats(state)
-            last_stat = now
-
-        cycle += 1
-        time.sleep(0.5)
+    if INTERACTIVE:
+        print("interactive mode — type a key then Enter (h for help)")
+        interactive_loop(conn, state)
+    else:
+        auto_loop(conn, state)
 
 
 if __name__ == "__main__":
