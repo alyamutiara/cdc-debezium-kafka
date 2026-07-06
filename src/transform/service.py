@@ -186,10 +186,9 @@ class TransformService:
         assert self._producer is not None
         spec = self._table_specs.get(event.table)
         output_topic = self._config.topic_for_table(f"cdc.source.{event.schema}.{event.table}")
-        output_key = _transform_key(key, spec.column_map if spec is not None else {})
         if spec is None:
             # No transform configured for this table — pass through.
-            self._produce_data(output_topic, event, output_key)
+            self._produce_data(output_topic, event, key)
             EVENTS_PROCESSED.labels(topic=output_topic, op=event.op.value).inc()
             return
 
@@ -200,6 +199,7 @@ class TransformService:
             EVENTS_FILTERED.labels(topic=f"cdc.source.{event.table}").inc()
             return
 
+        output_key = _transform_key(key, spec.column_map)
         if result.is_tombstone or result.row is None:
             self._produce_tombstone(output_topic, output_key)
             EVENTS_PROCESSED.labels(topic=output_topic, op=event.op.value).inc()

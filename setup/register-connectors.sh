@@ -34,6 +34,10 @@ wait_for_connect() {
 register_connector() {
     file="$1"
     name=$(connector_name "$file")
+    if [ -z "$name" ]; then
+        log "ERROR: failed to extract connector name from $file"
+        return 1
+    fi
     log "registering connector: $name"
 
     if wget -q -O /dev/null "${CONNECT_URL}/connectors/${name}"; then
@@ -81,6 +85,10 @@ main() {
         [ -f "$file" ] || continue
         register_connector "$file"
         name=$(connector_name "$file")
+        if [ -z "$name" ]; then
+            log "ERROR: failed to extract connector name from $file"
+            return 1
+        fi
         verify_running "$name" || true
     done
     log "setup complete"
