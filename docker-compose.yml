@@ -159,6 +159,8 @@ services:
       context: .
       dockerfile: Dockerfile.data-generator
     container_name: cdc-data-generator
+    stdin_open: true
+    tty: true
     depends_on:
       postgres-source:
         condition: service_healthy
@@ -171,7 +173,6 @@ services:
       INSERT_INTERVAL_SECONDS: "2"
       UPDATE_INTERVAL_SECONDS: "10"
       DELETE_INTERVAL_SECONDS: "60"
-    restart: unless-stopped
 
   setup:
     image: alpine:3.20

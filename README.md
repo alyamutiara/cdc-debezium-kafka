@@ -61,7 +61,62 @@ You'll notice the column rename in action: source `id` → target `order_id`,
 source `customer_id` → target `cust_id`. Also notice the `internal_notes` column
 is absent in the target — it was dropped by the transform.
 
-## What's in the box
+## Data generator
+
+The `data-generator` sidecar simulates live storefront traffic by INSERTing,
+UPDATEing, and DELETEing rows on the source Postgres.
+
+### Interactive mode (default)
+
+The generator starts in interactive mode. Type single-key commands to manually
+trigger operations — useful for controlled demos and debugging:
+
+```bash
+# Start the whole stack with the generator attached to your terminal
+docker compose run data-generator
+```
+
+Then type a key and press Enter:
+
+```
+> i    # trigger an INSERT
+> u    # trigger an UPDATE
+> d    # trigger a DELETE
+> a    # switch to auto mode (runs on a timer; Ctrl+C to return)
+> p    # view/set intervals, e.g.  p 2 10 60
+> s    # show stats
+> q    # quit
+```
+
+### Auto mode
+
+To run the generator on a timer instead (INSERTs every 2s, UPDATEs every 10s,
+DELETEs every 60s):
+
+```bash
+docker compose run -e INTERACTIVE=false data-generator
+```
+
+The intervals can be overridden:
+
+```bash
+docker compose run -e INTERACTIVE=false \
+  -e INSERT_INTERVAL_SECONDS=5 \
+  -e UPDATE_INTERVAL_SECONDS=15 \
+  -e DELETE_INTERVAL_SECONDS=120 \
+  data-generator
+```
+
+### Attaching to an already-running container
+
+If you ran `docker compose up` and the generator is running in the
+background, attach to it:
+
+```bash
+docker attach cdc-data-generator
+```
+
+Press `Ctrl+P` then `Ctrl+Q` to detach without stopping it.
 
 | Service | Role |
 | --- | --- |
