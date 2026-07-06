@@ -80,6 +80,7 @@ services:
     container_name: cdc-schema-registry
     environment:
       QUARKUS_PROFILE: mem
+      QUARKUS_MICROMETER_ENABLED: "false"
     ports:
       - "8081:8080"
     healthcheck:
