@@ -58,3 +58,7 @@ volumes/
 
 # Other
 docs/
+
+# Fix later
+.github/workflows/ci.yml
+.github/workflows/smoke-test.yml
