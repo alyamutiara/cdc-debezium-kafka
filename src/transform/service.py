@@ -185,10 +185,11 @@ class TransformService:
     def _process_data_event(self, event: DataEvent, key: bytes | None) -> None:
         assert self._producer is not None
         spec = self._table_specs.get(event.table)
+        output_topic = self._config.topic_for_table(f"cdc.source.{event.schema}.{event.table}")
+        output_key = _transform_key(key, spec.column_map if spec is not None else {})
         if spec is None:
             # No transform configured for this table — pass through.
-            output_topic = self._config.topic_for_table(f"cdc.source.{event.schema}.{event.table}")
-            self._produce_data(output_topic, event, key)
+            self._produce_data(output_topic, event, output_key)
             EVENTS_PROCESSED.labels(topic=output_topic, op=event.op.value).inc()
             return
 
@@ -199,17 +200,16 @@ class TransformService:
             EVENTS_FILTERED.labels(topic=f"cdc.source.{event.table}").inc()
             return
 
-        output_topic = self._config.topic_for_table(f"cdc.source.{event.schema}.{event.table}")
         if result.is_tombstone or result.row is None:
-            self._produce_tombstone(output_topic, key)
+            self._produce_tombstone(output_topic, output_key)
             EVENTS_PROCESSED.labels(topic=output_topic, op=event.op.value).inc()
             return
 
-        payload = json.dumps(result.row, default=_json_default).encode("utf-8")
+        payload = _encode_connect_record(result.row, schema_name=f"{output_topic}.Value")
         self._producer.produce(
             topic=output_topic,
             value=payload,
-            key=key,
+            key=output_key,
             headers=[("op", event.op.value.encode("utf-8"))],
         )
         EVENTS_PROCESSED.labels(topic=output_topic, op=event.op.value).inc()
@@ -221,7 +221,7 @@ class TransformService:
             self._produce_tombstone(topic, key)
             return
         row = event.after or {}
-        payload = json.dumps(row, default=_json_default).encode("utf-8")
+        payload = _encode_connect_record(row, schema_name=f"{topic}.Value")
         self._producer.produce(
             topic=topic,
             value=payload,
@@ -259,6 +259,76 @@ def _json_default(o: Any) -> Any:
     if hasattr(o, "__str__"):
         return str(o)
     raise TypeError(f"not json-serializable: {type(o).__name__}")
+
+
+def _normalize_json_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {k: _normalize_json_value(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_normalize_json_value(v) for v in value]
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    return _json_default(value)
+
+
+def _field_schema(field: str, value: Any) -> dict[str, Any]:
+    if isinstance(value, bool):
+        field_type = "boolean"
+        optional = False
+    elif isinstance(value, int):
+        field_type = "int32" if -(2**31) <= value <= (2**31 - 1) else "int64"
+        optional = False
+    elif isinstance(value, float):
+        field_type = "float64"
+        optional = False
+    elif value is None:
+        field_type = "string"
+        optional = True
+    else:
+        field_type = "string"
+        optional = False
+    return {"type": field_type, "optional": optional, "field": field}
+
+
+def _encode_connect_record(payload: dict[str, Any], schema_name: str) -> bytes:
+    normalized = {k: _normalize_json_value(v) for k, v in payload.items()}
+    document = {
+        "schema": {
+            "type": "struct",
+            "fields": [_field_schema(field, value) for field, value in normalized.items()],
+            "optional": False,
+            "name": schema_name,
+        },
+        "payload": normalized,
+    }
+    return json.dumps(document, separators=(",", ":")).encode("utf-8")
+
+
+def _transform_key(key: bytes | None, mapping: dict[str, str]) -> bytes | None:
+    if key is None or not mapping:
+        return key
+    try:
+        raw = json.loads(key.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return key
+    if not isinstance(raw, dict):
+        return key
+
+    payload = raw.get("payload", raw)
+    if not isinstance(payload, dict):
+        return key
+
+    transformed = {
+        mapping.get(str(k), str(k)): _normalize_json_value(v)
+        for k, v in payload.items()
+    }
+    schema_name = "transformed.Key"
+    schema = raw.get("schema")
+    if isinstance(schema, dict):
+        existing_name = schema.get("name")
+        if isinstance(existing_name, str) and existing_name:
+            schema_name = existing_name
+    return _encode_connect_record(transformed, schema_name=schema_name)
 
 
 def main() -> None:

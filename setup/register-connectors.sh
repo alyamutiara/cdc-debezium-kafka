@@ -1,8 +1,8 @@
-#!/usr/bin/env bash
+#!/bin/sh
 # Register Kafka Connect connectors (source + sink) once Connect is ready.
 # Polls the REST API with retry/backoff to handle the slow Connect startup.
 
-set -euo pipefail
+set -eu
 
 CONNECT_URL="${CONNECT_URL:-http://debezium-connect:8083}"
 CONNECTORS_DIR="${CONNECTORS_DIR:-/connectors}"
@@ -11,10 +11,15 @@ RETRY_DELAY="${RETRY_DELAY:-10}"
 
 log() { echo "[setup $(date -u +%H:%M:%S)] $*"; }
 
+connector_name() {
+    file="$1"
+    grep -oE '"name"[[:space:]]*:[[:space:]]*"[^"]+"' "$file" | head -n1 | cut -d'"' -f4
+}
+
 wait_for_connect() {
-    local attempt=1
+    attempt=1
     while [ $attempt -le $MAX_ATTEMPTS ]; do
-        if curl -fsS "${CONNECT_URL}/connectors" >/dev/null 2>&1; then
+        if wget -q --spider "${CONNECT_URL}/connectors"; then
             log "Kafka Connect is ready (attempt $attempt)"
             return 0
         fi
@@ -27,40 +32,36 @@ wait_for_connect() {
 }
 
 register_connector() {
-    local file="$1"
-    local name
-    name=$(basename "$file" .json)
+    file="$1"
+    name=$(connector_name "$file")
     log "registering connector: $name"
 
-    local status
-    status=$(curl -s -o /dev/null -w "%{http_code}" \
-        -X POST \
-        -H "Content-Type: application/json" \
-        --data @"$file" \
-        "${CONNECT_URL}/connectors")
+    if wget -q -O /dev/null "${CONNECT_URL}/connectors/${name}"; then
+        log "connector $name already exists — skipping"
+        return 0
+    fi
 
-    case "$status" in
-        201|200)
-            log "registered $name (status $status)"
-            ;;
-        409)
-            log "connector $name already exists — skipping"
-            ;;
-        *)
-            log "ERROR: failed to register $name (status $status)"
-            curl -s -X POST -H "Content-Type: application/json" \
-                --data @"$file" "${CONNECT_URL}/connectors" || true
-            return 1
-            ;;
-    esac
+    if wget -qO- \
+        --header "Content-Type: application/json" \
+        --post-file "$file" \
+        "${CONNECT_URL}/connectors" >/dev/null 2>&1; then
+        log "registered $name"
+        return 0
+    fi
+
+    log "ERROR: failed to register $name"
+    wget -S -O - \
+        --header "Content-Type: application/json" \
+        --post-file "$file" \
+        "${CONNECT_URL}/connectors" || true
+    return 1
 }
 
 verify_running() {
-    local name="$1"
-    local attempt=1
+    name="$1"
+    attempt=1
     while [ $attempt -le 20 ]; do
-        local state
-        state=$(curl -fsS "${CONNECT_URL}/connectors/${name}/status" 2>/dev/null \
+        state=$(wget -qO- "${CONNECT_URL}/connectors/${name}/status" 2>/dev/null \
             | grep -oE '"state":"[^"]+"' | head -n1 | cut -d'"' -f4)
         if [ "$state" = "RUNNING" ]; then
             log "$name is RUNNING"
@@ -79,7 +80,7 @@ main() {
     for file in "${CONNECTORS_DIR}"/*.json; do
         [ -f "$file" ] || continue
         register_connector "$file"
-        name=$(basename "$file" .json)
+        name=$(connector_name "$file")
         verify_running "$name" || true
     done
     log "setup complete"
