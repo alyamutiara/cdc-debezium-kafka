@@ -78,12 +78,10 @@ services:
   schema-registry:
     image: apicurio/apicurio-registry-mem:2.6.13.Final
     container_name: cdc-schema-registry
-    environment:
-      QUARKUS_PROFILE: mem
     ports:
       - "8081:8080"
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/apis/registry/v2/system/info >/dev/null 2>&1 || exit 1"]
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/apis/registry/v2/system/info >/dev/null 2>&1 || exit 1"]
       interval: 5s
       timeout: 5s
       retries: 20
@@ -180,11 +178,13 @@ services:
     depends_on:
       debezium-connect:
         condition: service_healthy
+    network_mode: "service:debezium-connect"
+    environment:
+      CONNECT_URL: http://localhost:8083
     volumes:
       - ./connectors:/connectors:ro
       - ./setup/register-connectors.sh:/register-connectors.sh:ro
-    entrypoint: ["/bin/sh", "-c"]
-    command: ["apk add --no-cache curl bash >/dev/null && bash /register-connectors.sh"]
+    entrypoint: ["/bin/sh", "/register-connectors.sh"]
     restart: "no"
 
   health-check-sidecar:
@@ -193,10 +193,12 @@ services:
     depends_on:
       setup:
         condition: service_completed_successfully
+    network_mode: "service:debezium-connect"
+    environment:
+      CONNECT_URL: http://localhost:8083
     volumes:
       - ./setup/health-check.sh:/health-check.sh:ro
-    entrypoint: ["/bin/sh", "-c"]
-    command: ["apk add --no-cache curl bash >/dev/null && bash /health-check.sh"]
+    entrypoint: ["/bin/sh", "/health-check.sh"]
     restart: unless-stopped
 
 volumes:
