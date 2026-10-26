@@ -58,7 +58,7 @@ volumes/
 
 # Other
 docs/
+.cursor/
 
-# Fix later
+# Inactive workflows
 .github/workflows/ci.yml
-.github/workflows/smoke-test.yml
