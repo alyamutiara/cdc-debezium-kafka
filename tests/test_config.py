@@ -103,3 +103,18 @@ def test_load_config_rejects_non_mapping_root(tmp_path: Path) -> None:
     cfg_path.write_text("- just\n- a\n- list\n")
     with pytest.raises(ValueError):
         load_config(cfg_path)
+
+
+def test_load_config_rejects_falsy_scalar_root(tmp_path: Path) -> None:
+    cfg_path = tmp_path / "transform.yaml"
+    cfg_path.write_text("false\n")
+    with pytest.raises(ValueError, match="mapping"):
+        load_config(cfg_path)
+
+
+def test_topic_prefix_allows_hyphens() -> None:
+    cfg = TransformConfig(
+        source_topics=["cdc.source.orders"],
+        output_topic_prefix="cdc-transformed",
+    )
+    assert cfg.topic_for_table("cdc.source.orders") == "cdc-transformed.orders"

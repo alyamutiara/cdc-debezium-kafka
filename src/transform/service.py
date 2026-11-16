@@ -21,6 +21,7 @@ from .config import TransformConfig, load_config
 from .ddl_handler import DdlDecision, DdlHandler
 from .envelope import DataEvent, EnvelopeError, Op, parse_event
 from .metrics import (
+    DDL_EVENTS,
     EVENTS_FAILED,
     EVENTS_FILTERED,
     EVENTS_PROCESSED,
@@ -49,6 +50,8 @@ class TransformService:
         self._bootstrap_servers = bootstrap_servers
         self._group_id = group_id
         self._stop_event = threading.Event()
+        self._healthy = True
+        self._last_error: str | None = None
         self._consumer: Consumer | None = None
         self._producer: TransformProducer | None = None
         self._ddl_handler = DdlHandler(on_ddl=self._on_ddl)
@@ -82,8 +85,7 @@ class TransformService:
         return Consumer({
             "bootstrap.servers": self._bootstrap_servers,
             "group.id": self._group_id,
-            "enable.auto.commit": True,
-            "auto.commit.interval.ms": 5000,
+            "enable.auto.commit": False,
             "auto.offset.reset": "earliest",
             "session.timeout.ms": 30000,
             "max.poll.interval.ms": 300000,
@@ -93,9 +95,11 @@ class TransformService:
         app = FastAPI(title="cdc-transform-service", version="0.1.0")
 
         @app.get("/health")
-        def health() -> dict[str, Any]:
-            return {
-                "status": "ok",
+        def health(response: Response) -> dict[str, Any]:
+            if not self._healthy:
+                response.status_code = 503
+            body: dict[str, Any] = {
+                "status": "ok" if self._healthy else "unhealthy",
                 "subscribed_topics": self._config.source_topics,
                 "ddl_stats": {
                     "add_columns": self._ddl_handler.stats.add_columns,
@@ -103,6 +107,9 @@ class TransformService:
                     "other_ddl": self._ddl_handler.stats.other_ddl,
                 },
             }
+            if self._last_error is not None:
+                body["error"] = self._last_error
+            return body
 
         @app.get("/metrics")
         def metrics() -> Response:
@@ -135,7 +142,14 @@ class TransformService:
                     continue
                 self._handle_message(msg)
                 self._producer.poll(0)
+        except Exception as exc:
+            self._healthy = False
+            self._last_error = str(exc)
+            log.exception("consume loop failed")
+            raise
         finally:
+            if not self._stop_event.is_set():
+                self._healthy = False
             self._shutdown()
 
     def _handle_message(self, msg: Any) -> None:
@@ -155,8 +169,9 @@ class TransformService:
                 return
 
             if parsed is None:
-                # Tombstone from upstream — pass through.
-                self._produce_tombstone(topic, key)
+                # Upstream Debezium tombstones follow op="d" events, which already
+                # emit a mapped tombstone to the output topic. Skip without looping.
+                log.debug("skipping upstream tombstone on %s", topic)
                 if self._consumer is not None:
                     self._consumer.commit(message=msg, asynchronous=False)
                 return
@@ -171,8 +186,17 @@ class TransformService:
 
             assert parsed.data is not None
             event: DataEvent = parsed.data
+            errors_before = self._producer.delivery_errors
             try:
-                self._process_data_event(event, key=key)
+                output_topic = self._process_data_event(event, key=key)
+                if output_topic is not None:
+                    remaining = self._producer.flush(timeout=10.0)
+                    if remaining > 0 or self._producer.delivery_errors > errors_before:
+                        raise RuntimeError(
+                            f"kafka delivery failed: remaining={remaining} "
+                            f"errors={self._producer.delivery_errors - errors_before}"
+                        )
+                    EVENTS_PROCESSED.labels(topic=output_topic, op=event.op.value).inc()
             except Exception:
                 log.exception("unhandled error processing %s op=%s", topic, event.op)
                 EVENTS_FAILED.labels(topic=topic, reason="unhandled").inc()
@@ -182,38 +206,41 @@ class TransformService:
             if self._consumer is not None:
                 self._consumer.commit(message=msg, asynchronous=False)
 
-    def _process_data_event(self, event: DataEvent, key: bytes | None) -> None:
+    def _process_data_event(self, event: DataEvent, key: bytes | None) -> str | None:
         assert self._producer is not None
         spec = self._table_specs.get(event.table)
         output_topic = self._config.topic_for_table(f"cdc.source.{event.schema}.{event.table}")
         if spec is None:
             # No transform configured for this table — pass through.
             self._produce_data(output_topic, event, key)
-            EVENTS_PROCESSED.labels(topic=output_topic, op=event.op.value).inc()
-            return
+            return output_topic
 
         try:
             result = transform_event(event, spec)
         except FilteredOutError as exc:
             log.info("filtered out: table=%s reason=%s", event.table, exc)
             EVENTS_FILTERED.labels(topic=f"cdc.source.{event.table}").inc()
-            return
+            return None
 
         output_key = _transform_key(key, spec.column_map)
         if result.is_tombstone or result.row is None:
             self._produce_tombstone(output_topic, output_key)
-            EVENTS_PROCESSED.labels(topic=output_topic, op=event.op.value).inc()
-            return
+            return output_topic
 
-        payload = _encode_connect_record(result.row, schema_name=f"{output_topic}.Value")
+        field_schemas = _map_field_schemas(event.row_schema, spec.column_map)
+        payload = _encode_connect_record(
+            result.row,
+            schema_name=f"{output_topic}.Value",
+            field_schemas=field_schemas,
+        )
         self._producer.produce(
             topic=output_topic,
             value=payload,
             key=output_key,
             headers=[("op", event.op.value.encode("utf-8"))],
         )
-        EVENTS_PROCESSED.labels(topic=output_topic, op=event.op.value).inc()
         log.debug("produced: %s op=%s row=%s", output_topic, event.op.value, result.row)
+        return output_topic
 
     def _produce_data(self, topic: str, event: DataEvent, key: bytes | None) -> None:
         assert self._producer is not None
@@ -221,7 +248,11 @@ class TransformService:
             self._produce_tombstone(topic, key)
             return
         row = event.after or {}
-        payload = _encode_connect_record(row, schema_name=f"{topic}.Value")
+        payload = _encode_connect_record(
+            row,
+            schema_name=f"{topic}.Value",
+            field_schemas=event.row_schema,
+        )
         self._producer.produce(
             topic=topic,
             value=payload,
@@ -236,8 +267,7 @@ class TransformService:
 
     def _on_ddl(self, decision: DdlDecision) -> None:
         # Counter for Prometheus visibility.
-        from .metrics import DDL_EVENTS
-        DDL_EVENTS.labels(kind=decision.action, action=decision.action).inc()
+        DDL_EVENTS.labels(kind=decision.kind, action=decision.action).inc()
         # Logged in ddl_handler.handle already.
 
     def _shutdown(self) -> None:
@@ -290,12 +320,39 @@ def _field_schema(field: str, value: Any) -> dict[str, Any]:
     return {"type": field_type, "optional": optional, "field": field}
 
 
-def _encode_connect_record(payload: dict[str, Any], schema_name: str) -> bytes:
+def _map_field_schemas(
+    row_schema: dict[str, dict[str, Any]] | None,
+    mapping: dict[str, str],
+) -> dict[str, dict[str, Any]] | None:
+    if not row_schema:
+        return None
+    mapped: dict[str, dict[str, Any]] = {}
+    for src_field, field_schema in row_schema.items():
+        dst_field = mapping.get(src_field, src_field)
+        copied = dict(field_schema)
+        copied["field"] = dst_field
+        mapped[dst_field] = copied
+    return mapped
+
+
+def _encode_connect_record(
+    payload: dict[str, Any],
+    schema_name: str,
+    field_schemas: dict[str, dict[str, Any]] | None = None,
+) -> bytes:
     normalized = {k: _normalize_json_value(v) for k, v in payload.items()}
+    fields = []
+    for field, value in normalized.items():
+        if field_schemas is not None and field in field_schemas:
+            schema_entry = dict(field_schemas[field])
+            schema_entry["field"] = field
+            fields.append(schema_entry)
+        else:
+            fields.append(_field_schema(field, value))
     document = {
         "schema": {
             "type": "struct",
-            "fields": [_field_schema(field, value) for field, value in normalized.items()],
+            "fields": fields,
             "optional": False,
             "name": schema_name,
         },
@@ -323,12 +380,25 @@ def _transform_key(key: bytes | None, mapping: dict[str, str]) -> bytes | None:
         for k, v in payload.items()
     }
     schema_name = "transformed.Key"
+    field_schemas: dict[str, dict[str, Any]] | None = None
     schema = raw.get("schema")
     if isinstance(schema, dict):
         existing_name = schema.get("name")
         if isinstance(existing_name, str) and existing_name:
             schema_name = existing_name
-    return _encode_connect_record(transformed, schema_name=schema_name)
+        raw_fields = schema.get("fields")
+        if isinstance(raw_fields, list):
+            raw_key_schemas = {
+                entry["field"]: dict(entry)
+                for entry in raw_fields
+                if isinstance(entry, dict) and isinstance(entry.get("field"), str)
+            }
+            field_schemas = _map_field_schemas(raw_key_schemas, mapping)
+    return _encode_connect_record(
+        transformed,
+        schema_name=schema_name,
+        field_schemas=field_schemas,
+    )
 
 
 def main() -> None:

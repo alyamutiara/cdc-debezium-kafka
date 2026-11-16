@@ -65,12 +65,14 @@ jobs:
 
           found=0
           for i in $(seq 1 30); do
-            count=$(docker exec cdc-postgres-target psql -U target -d analytics -t -c \
-              "SELECT COUNT(*) FROM public.orders WHERE total_cents = 1234")
-            if [ "$count" -gt 0 ]; then
-              echo "row landed in target (count=$count)"
-              found=1
-              break
+            if count=$(docker exec cdc-postgres-target psql -U target -d analytics -t -c \
+              "SELECT COUNT(*) FROM public.orders WHERE total_cents = 1234" 2>/dev/null); then
+              count=$(echo "$count" | tr -d '[:space:]')
+              if [ -n "$count" ] && [ "$count" -gt 0 ]; then
+                echo "row landed in target (count=$count)"
+                found=1
+                break
+              fi
             fi
             echo "waiting for row to land... ($i/30)"
             sleep 2

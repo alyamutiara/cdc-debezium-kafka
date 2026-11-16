@@ -55,13 +55,23 @@ class TransformProducer:
         key: bytes | None = None,
         headers: list[tuple[str, str | bytes | None]] | None = None,
     ) -> None:
-        self._producer.produce(
-            topic=topic,
-            value=value,
-            key=key,
-            headers=headers,
-            on_delivery=self._delivery_cb,
-        )
+        try:
+            self._producer.produce(
+                topic=topic,
+                value=value,
+                key=key,
+                headers=headers,
+                on_delivery=self._delivery_cb,
+            )
+        except BufferError:
+            self._producer.poll(0.5)
+            self._producer.produce(
+                topic=topic,
+                value=value,
+                key=key,
+                headers=headers,
+                on_delivery=self._delivery_cb,
+            )
 
     def poll(self, timeout: float = 0.0) -> int:
         return self._producer.poll(timeout)

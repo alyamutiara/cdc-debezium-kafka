@@ -46,18 +46,35 @@ def evaluate_filter(value: Any, op: str, target: Any) -> bool:
         return bool(value == target)
     if op == "!=":
         return bool(value != target)
-    if op == "<":
-        return value is not None and bool(value < target)
-    if op == "<=":
-        return value is not None and bool(value <= target)
-    if op == ">":
-        return value is not None and bool(value > target)
-    if op == ">=":
-        return value is not None and bool(value >= target)
+    if op in ("<", "<=", ">", ">="):
+        if value is None or target is None:
+            return False
+        try:
+            if op == "<":
+                return bool(value < target)
+            if op == "<=":
+                return bool(value <= target)
+            if op == ">":
+                return bool(value > target)
+            return bool(value >= target)
+        except TypeError:
+            log.warning(
+                "type mismatch in filter comparison: value=%r op=%s target=%r",
+                value, op, target,
+            )
+            return False
     if op == "in":
-        return value in (target or [])
+        try:
+            return value in (target or [])
+        except TypeError:
+            log.warning("invalid 'in' filter comparison: value=%r target=%r", value, target)
+            return False
     if op == "not in":
-        return value not in (target or [])
+        try:
+            return value not in (target or [])
+        except TypeError:
+            log.warning("invalid 'not in' filter comparison: value=%r target=%r", value, target)
+            return False
     raise ValueError(f"unsupported op: {op}")
 
 

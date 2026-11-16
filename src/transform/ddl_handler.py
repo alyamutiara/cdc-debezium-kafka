@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
@@ -28,6 +29,7 @@ class DdlDecision:
     action: str  # "evolve" | "manual" | "skip"
     reason: str
     table: str
+    kind: str = "OTHER"
     details: str = ""
 
 
@@ -36,7 +38,7 @@ class DdlHandlerStats:
     add_columns: int = 0
     drop_columns: int = 0
     other_ddl: int = 0
-    decisions: list[DdlDecision] = field(default_factory=list)
+    decisions: deque[DdlDecision] = field(default_factory=lambda: deque(maxlen=100))
 
 
 ADD_COLUMN_RE = re.compile(
@@ -96,6 +98,7 @@ class DdlHandler:
                 action="evolve",
                 reason="ALTER TABLE ADD COLUMN — auto.evolve handles this in JDBC sink",
                 table=m.group("table"),
+                kind=event.kind,
                 details=f"add column: {column}",
             )
 
@@ -109,6 +112,7 @@ class DdlHandler:
                     "intervention on the target table to avoid data loss"
                 ),
                 table=m.group("table"),
+                kind=event.kind,
                 details=f"drop column: {column}",
             )
 
@@ -117,21 +121,25 @@ class DdlHandler:
                 action="skip",
                 reason="CREATE statement — JDBC sink will auto-create the target table",
                 table=event.table or "(unknown)",
+                kind=event.kind,
             )
         if upper.startswith("DROP"):
             return DdlDecision(
                 action="skip",
                 reason="DROP statement — log only, manual intervention required",
                 table=event.table or "(unknown)",
+                kind=event.kind,
             )
         if upper.startswith("ALTER"):
             return DdlDecision(
                 action="skip",
                 reason="ALTER (non-add/drop column) — log only",
                 table=event.table or "(unknown)",
+                kind=event.kind,
             )
         return DdlDecision(
             action="skip",
             reason="Other DDL — log only",
             table=event.table or "(unknown)",
+            kind=event.kind,
         )

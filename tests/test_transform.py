@@ -56,6 +56,7 @@ def test_evaluate_lt() -> None:
     assert evaluate_filter(1, "<", 2) is True
     assert evaluate_filter(2, "<", 1) is False
     assert evaluate_filter(None, "<", 1) is False
+    assert evaluate_filter("not-a-number", "<", 1) is False
 
 
 def test_evaluate_in() -> None:

@@ -31,6 +31,40 @@ wait_for_connect() {
     return 1
 }
 
+extract_config_json() {
+    file="$1"
+    awk '/"config"[[:space:]]*:[[:space:]]*\{/ { sub(/^[^{]*\{/, "{"); printing=1 } printing { print }' "$file" | sed '$d'
+}
+
+put_json() {
+    url="$1"
+    payload_file="$2"
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsS -X PUT -H "Content-Type: application/json" --data-binary @"$payload_file" "$url" >/dev/null
+        return $?
+    fi
+    # BusyBox wget lacks --method=PUT; send HTTP/1.0 PUT over nc for http:// URLs.
+    host_port="${url#http://}"
+    path="/${host_port#*/}"
+    host_port="${host_port%%/*}"
+    host="${host_port%%:*}"
+    port="${host_port#*:}"
+    [ "$port" = "$host_port" ] && port=80
+    len=$(wc -c < "$payload_file" | tr -d '[:space:]')
+    resp=$(
+        {
+            printf 'PUT %s HTTP/1.0\r\nHost: %s\r\nContent-Type: application/json\r\nContent-Length: %s\r\nConnection: close\r\n\r\n' \
+                "$path" "$host_port" "$len"
+            cat "$payload_file"
+        } | nc "$host" "$port" 2>/dev/null || true
+    )
+    status=$(printf '%s\n' "$resp" | head -n1 | awk '{print $2}')
+    case "$status" in
+        200|201) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 register_connector() {
     file="$1"
     name=$(connector_name "$file")
@@ -41,8 +75,16 @@ register_connector() {
     log "registering connector: $name"
 
     if wget -q -O /dev/null "${CONNECT_URL}/connectors/${name}"; then
-        log "connector $name already exists — skipping"
-        return 0
+        tmp_cfg=$(mktemp)
+        extract_config_json "$file" > "$tmp_cfg"
+        if put_json "${CONNECT_URL}/connectors/${name}/config" "$tmp_cfg"; then
+            rm -f "$tmp_cfg"
+            log "updated existing connector $name"
+            return 0
+        fi
+        rm -f "$tmp_cfg"
+        log "WARN: failed to update existing connector $name"
+        return 1
     fi
 
     if wget -qO- \
@@ -65,9 +107,9 @@ verify_running() {
     name="$1"
     attempt=1
     while [ $attempt -le 20 ]; do
-        state=$(wget -qO- "${CONNECT_URL}/connectors/${name}/status" 2>/dev/null \
-            | grep -oE '"state":"[^"]+"' | head -n1 | cut -d'"' -f4)
-        if [ "$state" = "RUNNING" ]; then
+        body=$(wget -qO- "${CONNECT_URL}/connectors/${name}/status" 2>/dev/null || echo '')
+        state=$(echo "$body" | grep -oE '"state"[[:space:]]*:[[:space:]]*"[^"]+"' | head -n1 | cut -d'"' -f4)
+        if [ "$state" = "RUNNING" ] && ! echo "$body" | grep -qE '"state"[[:space:]]*:[[:space:]]*"FAILED"'; then
             log "$name is RUNNING"
             return 0
         fi
@@ -81,8 +123,18 @@ verify_running() {
 
 main() {
     wait_for_connect
-    for file in "${CONNECTORS_DIR}"/*.json; do
+    # Register source connectors before sink connectors.
+    for file in "${CONNECTORS_DIR}"/source-*.json "${CONNECTORS_DIR}"/*.json; do
         [ -f "$file" ] || continue
+        case "$file" in
+            "${CONNECTORS_DIR}"/source-*.json) ;;
+            *)
+                base=$(basename "$file")
+                case "$base" in
+                    source-*.json) continue ;;
+                esac
+                ;;
+        esac
         register_connector "$file"
         name=$(connector_name "$file")
         if [ -z "$name" ]; then

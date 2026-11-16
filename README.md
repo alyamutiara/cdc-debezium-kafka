@@ -126,7 +126,7 @@ Press `Ctrl+P` then `Ctrl+Q` to detach without stopping it.
 | `schema-registry` | Apicurio Registry (in-memory). Sets the stage for Avro in Phase B. |
 | `debezium-connect` | Kafka Connect + Debezium Postgres + JDBC sink plugins. |
 | `transform-service` | **Custom Python FastAPI service.** Consumes CDC events, applies transforms, produces to output topics. Exposes `/metrics` and `/health`. |
-| `data-generator` | Python sidecar. INSERTs every 2s, UPDATEs every 10s, DELETEs every 60s. |
+| `data-generator` | Python sidecar (interactive by default; set `INTERACTIVE=false` for auto mode: INSERTs every 2s, UPDATEs every 10s, DELETEs every 60s). |
 | `setup` | One-shot Alpine. Polls Connect REST, registers source + sink connectors, exits. |
 | `health-check-sidecar` | Alpine. Polls connector status every 30s, restarts FAILED connectors. |
 
@@ -197,8 +197,12 @@ of bash and saves a 2am page.
 
 ## DDL handling
 
-Debezium captures schema-change events alongside data events. The transform
-service classifies them:
+Debezium's Postgres `pgoutput` connector does not emit standalone DDL
+schema-change events (schema changes in Postgres flow through the updated
+Connect `schema` attached to subsequent data events, which the transform
+service preserves so the JDBC sink's `auto.evolve=true` can evolve target
+tables). For connectors that do emit DDL schema-change events (such as MySQL
+in Phase B), the transform service's `DdlHandler` classifies them:
 
 | DDL | Action |
 | --- | --- |

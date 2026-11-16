@@ -138,6 +138,35 @@ def _ts() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def load_existing_state(conn: psycopg.Connection, state: State) -> None:
+    """Populate State from existing DB rows so restarts resume cleanly."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id, price_cents FROM products ORDER BY id")
+            existing_products = set(state.product_ids)
+            for pid, price_cents in cur.fetchall():
+                if pid not in existing_products:
+                    state.product_ids.append(pid)
+                    existing_products.add(pid)
+                state.product_prices[pid] = price_cents
+
+            cur.execute("SELECT id FROM customers ORDER BY id")
+            existing_customers = set(state.customer_ids)
+            for (cid,) in cur.fetchall():
+                if cid not in existing_customers:
+                    state.customer_ids.append(cid)
+                    existing_customers.add(cid)
+
+            cur.execute("SELECT id FROM orders ORDER BY id")
+            existing_orders = set(state.order_ids)
+            for (oid,) in cur.fetchall():
+                if oid not in existing_orders:
+                    state.order_ids.append(oid)
+                    existing_orders.add(oid)
+    except pg_errors.Error as exc:
+        log.warning("failed to load existing state: %s", exc)
+
+
 def seed_products(conn: psycopg.Connection, state: State) -> None:
     for sku, name, price_cents, notes in PRODUCT_CATALOG:
         try:
@@ -310,9 +339,9 @@ def update_order_status(conn: psycopg.Connection, state: State) -> None:
                 new_status = random.choice(CANCELLABLE) if current in CANCELLABLE else current
             ts = _ts()
             cur.execute(
-                "UPDATE orders SET status = %s, internal_notes = %s, created_at = %s "
+                "UPDATE orders SET status = %s, internal_notes = %s "
                 "WHERE id = %s RETURNING status",
-                (new_status, f"status changed at {ts}", ts, order_id),
+                (new_status, f"status changed at {ts}", order_id),
             )
             updated = cur.fetchone()
             if updated is not None:
@@ -335,9 +364,9 @@ def cancel_order(conn: psycopg.Connection, state: State) -> None:
             order_id = row[0]
             ts = _ts()
             cur.execute(
-                "UPDATE orders SET status = 'cancelled', internal_notes = %s, created_at = %s "
+                "UPDATE orders SET status = 'cancelled', internal_notes = %s "
                 "WHERE id = %s",
-                (f"cancelled at {ts}", ts, order_id),
+                (f"cancelled at {ts}", order_id),
             )
             state.orders_updated += 1
             log.info("CANCEL order id=%d ts=%s", order_id, ts)
@@ -379,8 +408,8 @@ def update_customer(conn: psycopg.Connection, state: State) -> None:
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "UPDATE customers SET full_name = %s, created_at = %s WHERE id = %s RETURNING id",
-                (new_name, ts, customer_id),
+                "UPDATE customers SET full_name = %s WHERE id = %s RETURNING id",
+                (new_name, customer_id),
             )
             row = cur.fetchone()
             if row is not None:
@@ -400,9 +429,9 @@ def update_product_price(conn: psycopg.Connection, state: State) -> None:
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "UPDATE products SET price_cents = %s, internal_notes = %s, created_at = %s "
+                "UPDATE products SET price_cents = %s, internal_notes = %s "
                 "WHERE id = %s RETURNING name",
-                (new_price, f"price change at {ts}", ts, product_id),
+                (new_price, f"price change at {ts}", product_id),
             )
             row = cur.fetchone()
             if row is not None:
@@ -585,8 +614,10 @@ def main() -> None:
     log.info("seeding %d customers and %d products...", SEED_COUNT, len(PRODUCT_CATALOG))
     seed_products(conn, state)
     seed_customers(conn, state)
+    load_existing_state(conn, state)
     log.info(
-        "seeded %d customers, %d products", len(state.customer_ids), len(state.product_ids),
+        "loaded state: %d customers, %d products, %d orders",
+        len(state.customer_ids), len(state.product_ids), len(state.order_ids),
     )
 
     if INTERACTIVE:
