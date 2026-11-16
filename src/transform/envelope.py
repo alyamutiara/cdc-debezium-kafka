@@ -4,7 +4,8 @@ The transform service consumes the standard Debezium JSON format:
 - `payload.op` is one of "c" (create/insert), "u" (update), "d" (delete), "r" (read/snapshot)
 - `payload.before` is the row state before the change (null for inserts)
 - `payload.after` is the row state after the change (null for deletes)
-- Schema-change events have `payload.source` with a `ddl` field.
+- Schema-change events carry a `ddl` field on `payload` (or `payload.source`
+  in legacy/custom envelopes).
 """
 from __future__ import annotations
 
@@ -43,6 +44,7 @@ class DataEvent:
     after: dict[str, Any] | None
     source: dict[str, Any]
     ts_ms: int | None = None
+    row_schema: dict[str, dict[str, Any]] | None = None
 
     @property
     def row(self) -> dict[str, Any] | None:
@@ -104,9 +106,9 @@ def parse_event(raw_value: bytes | str) -> ParsedEvent:
     if not isinstance(source, dict):
         raise EnvelopeError("missing or non-object 'payload.source' field")
 
-    # Schema-change events: payload contains a `ddl` field.
-    if "ddl" in source and isinstance(source["ddl"], str):
-        ddl_sql = source["ddl"]
+    # Schema-change events: Debezium places `ddl` at payload.ddl (or legacy payload.source.ddl).
+    ddl_sql = payload.get("ddl") if isinstance(payload.get("ddl"), str) else source.get("ddl")
+    if isinstance(ddl_sql, str):
         kind = _classify_ddl(ddl_sql)
         return ParsedEvent(
             data=None,
@@ -143,10 +145,42 @@ def parse_event(raw_value: bytes | str) -> ParsedEvent:
             after=after if isinstance(after, dict) else None,
             source=source,
             ts_ms=payload.get("ts_ms"),
+            row_schema=_extract_row_schema(
+                raw.get("schema"),
+                prefer="before" if op.is_delete else "after",
+            ),
         ),
         ddl=None,
         raw=raw,
     )
+
+
+def _extract_row_schema(
+    envelope_schema: Any,
+    prefer: str = "after",
+) -> dict[str, dict[str, Any]] | None:
+    """Extract per-column Connect schemas from Debezium's envelope schema."""
+    if not isinstance(envelope_schema, dict):
+        return None
+    fields = envelope_schema.get("fields")
+    if not isinstance(fields, list):
+        return None
+
+    fallback = "after" if prefer == "before" else "before"
+    for target in (prefer, fallback):
+        for entry in fields:
+            if not isinstance(entry, dict) or entry.get("field") != target:
+                continue
+            sub_fields = entry.get("fields")
+            if not isinstance(sub_fields, list):
+                continue
+            result: dict[str, dict[str, Any]] = {}
+            for col in sub_fields:
+                if isinstance(col, dict) and isinstance(col.get("field"), str):
+                    result[col["field"]] = dict(col)
+            if result:
+                return result
+    return None
 
 
 def _classify_ddl(ddl: str) -> str:

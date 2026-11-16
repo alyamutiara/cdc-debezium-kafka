@@ -1,9 +1,6 @@
 # CDC Pipeline
 
-A self-contained, locally-runnable **Change Data Capture** pipeline that demonstrates
-production-grade data engineering: Postgres → Debezium → Kafka → Python transform →
-Kafka → JDBC sink → Postgres. Built to show ecosystem knowledge and engineering
-judgment in a portfolio context.
+A self-contained, locally-runnable **Change Data Capture** pipeline that demonstrates production-grade data engineering: Postgres → Debezium → Kafka → Python transform → Kafka → JDBC sink → Postgres. Built to show ecosystem knowledge and engineering judgment in a portfolio context.
 
 ## What it does
 
@@ -25,13 +22,9 @@ judgment in a portfolio context.
 └──────────┘    └──────────┘
 ```
 
-A hiring manager can `docker compose up` and watch a real CDC pipeline run end-to-end:
-the data generator INSERTs/UPDATEs/DELETEs on the source Postgres, the change events
-flow through Kafka, the custom Python transform service applies column mapping and
-filtering, and the JDBC sink writes to the target Postgres.
+A hiring manager can `docker compose up` and watch a real CDC pipeline run end-to-end: the data generator INSERTs/UPDATEs/DELETEs on the source Postgres, the change events flow through Kafka, the custom Python transform service applies column mapping and filtering, and the JDBC sink writes to the target Postgres.
 
-The custom transform service is where the engineering judgment lives — it's not
-just YAML wiring together existing tools.
+The custom transform service is where the engineering judgment lives — it's not just YAML wiring together existing tools.
 
 ## Quick start
 
@@ -57,19 +50,15 @@ INSERT INTO orders (customer_id, status, total_cents) VALUES (1, 'pending', 9999
 SELECT order_id, cust_id, status, total_cents FROM public.orders ORDER BY order_id DESC LIMIT 5;
 ```
 
-You'll notice the column rename in action: source `id` → target `order_id`,
-source `customer_id` → target `cust_id`. Also notice the `internal_notes` column
-is absent in the target — it was dropped by the transform.
+You'll notice the column rename in action: source `id` → target `order_id`, source `customer_id` → target `cust_id`. Also notice the `internal_notes` column is absent in the target — it was dropped by the transform.
 
 ## Data generator
 
-The `data-generator` sidecar simulates live storefront traffic by INSERTing,
-UPDATEing, and DELETEing rows on the source Postgres.
+The `data-generator` sidecar simulates live storefront traffic by INSERTing, UPDATEing, and DELETEing rows on the source Postgres.
 
 ### Interactive mode (default)
 
-The generator starts in interactive mode. Type single-key commands to manually
-trigger operations — useful for controlled demos and debugging:
+The generator starts in interactive mode. Type single-key commands to manually trigger operations — useful for controlled demos and debugging:
 
 ```bash
 # Start the whole stack with the generator attached to your terminal
@@ -90,8 +79,7 @@ Then type a key and press Enter:
 
 ### Auto mode
 
-To run the generator on a timer instead (INSERTs every 2s, UPDATEs every 10s,
-DELETEs every 60s):
+To run the generator on a timer instead (INSERTs every 2s, UPDATEs every 10s, DELETEs every 60s):
 
 ```bash
 docker compose run -e INTERACTIVE=false data-generator
@@ -109,8 +97,7 @@ docker compose run -e INTERACTIVE=false \
 
 ### Attaching to an already-running container
 
-If you ran `docker compose up` and the generator is running in the
-background, attach to it:
+If you ran `docker compose up` and the generator is running in the background, attach to it:
 
 ```bash
 docker attach cdc-data-generator
@@ -126,7 +113,7 @@ Press `Ctrl+P` then `Ctrl+Q` to detach without stopping it.
 | `schema-registry` | Apicurio Registry (in-memory). Sets the stage for Avro in Phase B. |
 | `debezium-connect` | Kafka Connect + Debezium Postgres + JDBC sink plugins. |
 | `transform-service` | **Custom Python FastAPI service.** Consumes CDC events, applies transforms, produces to output topics. Exposes `/metrics` and `/health`. |
-| `data-generator` | Python sidecar. INSERTs every 2s, UPDATEs every 10s, DELETEs every 60s. |
+| `data-generator` | Python sidecar (interactive by default; set `INTERACTIVE=false` for auto mode: INSERTs every 2s, UPDATEs every 10s, DELETEs every 60s). |
 | `setup` | One-shot Alpine. Polls Connect REST, registers source + sink connectors, exits. |
 | `health-check-sidecar` | Alpine. Polls connector status every 30s, restarts FAILED connectors. |
 
@@ -134,71 +121,44 @@ Press `Ctrl+P` then `Ctrl+Q` to detach without stopping it.
 
 ### Why Debezium + Kafka, not a from-scratch CDC tool?
 
-Knowing the tools data teams actually use is a stronger portfolio signal than
-rebuilding log-tailing. Debezium is the standard for Postgres CDC; Kafka is
-the standard streaming bus. Demonstrating how to wire them up correctly is the
-job.
+Knowing the tools data teams actually use is a stronger portfolio signal than rebuilding log-tailing. Debezium is the standard for Postgres CDC; Kafka is the standard streaming bus. Demonstrating how to wire them up correctly is the job.
 
 ### Why a custom Python transform service?
 
-The "raw Debezium → sink" pipeline is a 30-line `docker-compose.yml`. The
-interesting engineering starts where you need to:
+The "raw Debezium → sink" pipeline is a 30-line `docker-compose.yml`. The interesting engineering starts where you need to:
 
 - **Filter** events (e.g., drop soft-deleted rows before they hit the warehouse)
 - **Rename / drop** columns (PII, internal fields, denormalization)
 - **Enrich** (joins, lookups) — Phase B
 - **Observe** what the pipeline is actually doing
 
-A custom service that does these things — and exposes Prometheus metrics for
-the work — is where production thinking shows up. The same applies whether
-you build the service in Python, Go, or Java; the design is what matters.
+A custom service that does these things — and exposes Prometheus metrics for the work — is where production thinking shows up. The same applies whether you build the service in Python, Go, or Java; the design is what matters.
 
 ### Why FastAPI, not Flask or raw HTTP?
 
-The transform service needs to expose `/health` and `/metrics` to the outside
-world. FastAPI gives us both with no boilerplate, and uvicorn runs in a
-background thread inside the same process as the Kafka consumer — one
-process, two responsibilities, low ops cost.
+The transform service needs to expose `/health` and `/metrics` to the outside world. FastAPI gives us both with no boilerplate, and uvicorn runs in a background thread inside the same process as the Kafka consumer — one process, two responsibilities, low ops cost.
 
 ### Why at-least-once, not exactly-once?
 
-The transform consumer commits the Kafka offset **after** a successful produce
-to the output topic. On crash between consume and produce, the event is
-replayed — duplicates are possible. The JDBC sink uses `insert.mode=upsert`,
-so duplicates are harmless: the second write just overwrites the first.
+The transform consumer commits the Kafka offset **after** a successful produce to the output topic. On crash between consume and produce, the event is replayed — duplicates are possible. The JDBC sink uses `insert.mode=upsert`, so duplicates are harmless: the second write just overwrites the first.
 
-Exactly-once would require Kafka transactions across the consumer-producer
-boundary and a transactional sink. That's a real option in production, but
-the operational complexity (transaction coordinator, isolation level,
-downstream idempotency keys) isn't justified for a portfolio project.
+Exactly-once would require Kafka transactions across the consumer-producer boundary and a transactional sink. That's a real option in production, but the operational complexity (transaction coordinator, isolation level, downstream idempotency keys) isn't justified for a portfolio project.
 
 ### Why Pydantic for the transform config?
 
-Transform YAMLs are easy to typo, and a typo in production means silent data
-loss: the transform silently drops or misroutes events. Pydantic v2
-validates the config at startup and rejects invalid field names, missing
-required keys, or unsupported filter operators with a clear error before
-the service accepts traffic.
+Transform YAMLs are easy to typo, and a typo in production means silent data loss: the transform silently drops or misroutes events. Pydantic v2 validates the config at startup and rejects invalid field names, missing required keys, or unsupported filter operators with a clear error before the service accepts traffic.
 
 ### Why KRAFT, not Zookeeper?
 
-KRAFT is the future of Kafka (Zookeeper is being deprecated). Single-node
-local dev benefits from a shorter startup chain (no second container just
-to manage cluster state). The setup is slightly different (no `KAFKA_ZOOKEEPER_CONNECT`)
-but the operational model is simpler.
+KRAFT is the future of Kafka (Zookeeper is being deprecated). Single-node local dev benefits from a shorter startup chain (no second container just to manage cluster state). The setup is slightly different (no `KAFKA_ZOOKEEPER_CONNECT`) but the operational model is simpler.
 
 ### Why a separate health-check sidecar?
 
-Kafka Connect's REST API is the canonical way to introspect connector health,
-but Connect itself doesn't auto-restart FAILED connectors. A small sidecar
-polling the REST API and POSTing `/connectors/{name}/restart` on FAILED state
-catches the cases that would otherwise need a human to notice. It's 30 lines
-of bash and saves a 2am page.
+Kafka Connect's REST API is the canonical way to introspect connector health, but Connect itself doesn't auto-restart FAILED connectors. A small sidecar polling the REST API and POSTing `/connectors/{name}/restart` on FAILED state catches the cases that would otherwise need a human to notice. It's 30 lines of bash and saves a 2am page.
 
 ## DDL handling
 
-Debezium captures schema-change events alongside data events. The transform
-service classifies them:
+Debezium's Postgres `pgoutput` connector does not emit standalone DDL schema-change events (schema changes in Postgres flow through the updated Connect `schema` attached to subsequent data events, which the transform service preserves so the JDBC sink's `auto.evolve=true` can evolve target tables). For connectors that do emit DDL schema-change events (such as MySQL in Phase B), the transform service's `DdlHandler` classifies them:
 
 | DDL | Action |
 | --- | --- |
@@ -207,10 +167,7 @@ service classifies them:
 | `CREATE TABLE` / `DROP TABLE` | Logged and skipped. JDBC sink auto-creates target tables. |
 | Other `ALTER` (type changes, etc.) | Logged and skipped. |
 
-DDL events are processed in Kafka order, before subsequent data events, so
-schema consistency is maintained. The transform service's `DdlHandler`
-emits a Prometheus counter (`ddl_events_total{kind,action}`) so you can
-alert on unexpected schema changes.
+DDL events are processed in Kafka order, before subsequent data events, so schema consistency is maintained. The transform service's `DdlHandler` emits a Prometheus counter (`ddl_events_total{kind,action}`) so you can alert on unexpected schema changes.
 
 ## Topic naming
 
@@ -241,8 +198,7 @@ Key metrics:
 - `ddl_events_total{kind, action}` — DDL events observed
 - `service_uptime_seconds` — Service uptime
 
-Kafka consumer-group lag is not exposed in Phase A (it requires an admin
-client); this is documented as Phase B work.
+Kafka consumer-group lag is not exposed in Phase A (it requires an admin client); this is documented as Phase B work.
 
 ## Tests
 
@@ -273,13 +229,11 @@ INTEGRATION=1 pytest tests/test_e2e.py tests/test_ddl_e2e.py \
                     tests/test_restart.py tests/test_health_check.py
 ```
 
-These verify end-to-end flow, ALTER TABLE auto-evolution, restart behavior,
-and connector health-check recovery.
+These verify end-to-end flow, ALTER TABLE auto-evolution, restart behavior, and connector health-check recovery.
 
 ### Smoke test (CI)
 
-A GitHub Actions workflow validates that `docker compose up` works and
-rows actually land in the target Postgres on every push.
+A GitHub Actions workflow validates that `docker compose up` works and rows actually land in the target Postgres on every push.
 
 ## Configuration
 
@@ -303,23 +257,16 @@ transforms:
         value: "deleted"
 ```
 
-Each `transforms` block is keyed by the source table name. The transform
-service applies `column_map`, then `drop_columns`, then evaluates each
-`filter` rule in order. The first matching filter drops the event.
+Each `transforms` block is keyed by the source table name. The transform service applies `column_map`, then `drop_columns`, then evaluates each `filter` rule in order. The first matching filter drops the event.
 
 Supported filter ops: `=`, `!=`, `<`, `<=`, `>`, `>=`, `in`, `not in`.
 
 ## Known limitations
 
-- **Single-broker local dev.** Topics have 1 partition. A production deployment
-  would use 3+ brokers and 3+ partitions per topic.
-- **In-memory Schema Registry.** State resets on restart. Phase B will move
-  to a backed registry (Postgres) and Avro.
-- **`ALTER TABLE DROP COLUMN` is not auto-evolved.** The transform service
-  logs a warning; manual intervention is required to drop the column on the
-  target. Auto-drop is dangerous (data loss) and rarely desired.
-- **No consumer-group lag metric on the transform service.** Deferred to
-  Phase B (requires `AdminClient.list_consumer_group_offsets`).
+- **Single-broker local dev.** Topics have 1 partition. A production deployment would use 3+ brokers and 3+ partitions per topic.
+- **In-memory Schema Registry.** State resets on restart. Phase B will move to a backed registry (Postgres) and Avro.
+- **`ALTER TABLE DROP COLUMN` is not auto-evolved.** The transform service logs a warning; manual intervention is required to drop the column on the target. Auto-drop is dangerous (data loss) and rarely desired.
+- **No consumer-group lag metric on the transform service.** Deferred to Phase B (requires `AdminClient.list_consumer_group_offsets`).
 - **JSON message format.** Avro upgrade path is documented but not implemented.
 - **No enrichment transforms.** Joins and external lookups are Phase B.
 
@@ -386,10 +333,8 @@ docker compose down -v
 - **Multi-source:** Add MySQL via a second Debezium connector.
 - **ksqlDB:** Streaming SQL transforms (joins, aggregations).
 - **Parquet sink:** Local file output for analytics.
-- **Custom Java Kafka Connect sink:** A native Kafka Connect plugin for
-  destinations the JDBC sink can't handle.
-- **Avro + backed Schema Registry:** Replace JSON with Avro. Move the
-  Schema Registry from in-memory to a Postgres-backed store.
+- **Custom Java Kafka Connect sink:** A native Kafka Connect plugin for destinations the JDBC sink can't handle.
+- **Avro + backed Schema Registry:** Replace JSON with Avro. Move the Schema Registry from in-memory to a Postgres-backed store.
 - **Consumer-group lag metric** on the transform service.
 
 ## License

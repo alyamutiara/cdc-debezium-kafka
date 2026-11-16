@@ -153,12 +153,17 @@ def test_e2e_drop_column_excluded() -> None:
             deadline = time.time() + E2E_TIMEOUT_S
             while time.time() < deadline:
                 cur.execute(
-                    "SELECT internal_notes FROM public.orders WHERE order_id = %s",
+                    "SELECT 1 FROM public.orders WHERE order_id = %s",
                     (order_id,),
                 )
-                row = cur.fetchone()
-                if row is not None:
-                    assert row[0] is None
+                if cur.fetchone() is not None:
+                    cur.execute(
+                        "SELECT COUNT(*) FROM information_schema.columns "
+                        "WHERE table_schema = 'public' "
+                        "AND table_name = 'orders' "
+                        "AND column_name = 'internal_notes'",
+                    )
+                    assert cur.fetchone()[0] == 0
                     return
                 time.sleep(1.0)
             pytest.fail("order did not appear in target")

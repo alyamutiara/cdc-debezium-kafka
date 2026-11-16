@@ -33,13 +33,13 @@ while true; do
     else
         for name in $connectors; do
             body=$(wget -qO- "${CONNECT_URL}/connectors/${name}/status" 2>/dev/null || echo '{}')
-            state=$(echo "$body" | grep -oE '"state":"[^"]+"' | head -n1 | cut -d'"' -f4)
-            trace=$(echo "$body" | grep -oE '"trace":"[^"]+"' | head -n1 | cut -d'"' -f4)
+            state=$(echo "$body" | grep -oE '"state"[[:space:]]*:[[:space:]]*"[^"]+"' | head -n1 | cut -d'"' -f4)
+            trace=$(echo "$body" | grep -oE '"trace"[[:space:]]*:[[:space:]]*"[^"]+"' | head -n1 | cut -d'"' -f4)
 
-            if [ "$state" = "FAILED" ]; then
-                log "connector $name is FAILED — restarting"
+            if echo "$body" | grep -qE '"state"[[:space:]]*:[[:space:]]*"FAILED"'; then
+                log "connector $name (connector=${state:-unknown}) has FAILED state/task — restarting"
                 [ -n "$trace" ] && log "  trace: $trace"
-                wget -qO- "${CONNECT_URL}/connectors/${name}/restart" \
+                wget -qO- "${CONNECT_URL}/connectors/${name}/restart?includeTasks=true&onlyFailed=true" \
                     --header "Content-Type: application/json" \
                     --post-data '{}' >/dev/null 2>&1 \
                     || log "  restart request failed for $name"

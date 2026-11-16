@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 SUPPORTED_OPS = {"=", "!=", "<", "<=", ">", ">=", "in", "not in"}
 VALID_IDENT = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
+VALID_TOPIC_PREFIX = re.compile(r"^[a-zA-Z0-9_-]+(\.[a-zA-Z0-9_-]+)*$")
 
 
 class FilterRule(BaseModel):
@@ -92,14 +93,14 @@ class TransformConfig(BaseModel):
                 raise ValueError(f"invalid topic: {t!r}")
             if "." not in t:
                 raise ValueError(
-                    f"topic {t!r} should follow cdc.source.{{schema}}.{{table}} convention"
+                    f"topic {t!r} should follow cdc.source.{{table}} convention"
                 )
         return v
 
     @field_validator("output_topic_prefix")
     @classmethod
     def _prefix_nonempty(cls, v: str) -> str:
-        if not v or not v.replace(".", "").replace("_", "").isalnum():
+        if not v or not VALID_TOPIC_PREFIX.match(v):
             raise ValueError(f"invalid output_topic_prefix: {v!r}")
         return v
 
@@ -116,7 +117,9 @@ def load_config(path: str | Path) -> TransformConfig:
     p = Path(path)
     if not p.exists():
         raise FileNotFoundError(f"config not found: {p}")
-    raw = yaml.safe_load(p.read_text()) or {}
+    raw = yaml.safe_load(p.read_text())
+    if raw is None:
+        raw = {}
     if not isinstance(raw, dict):
         raise ValueError("config root must be a mapping")
     return TransformConfig.model_validate(raw)

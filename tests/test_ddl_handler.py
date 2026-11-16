@@ -79,4 +79,13 @@ def test_quoted_identifiers_handled() -> None:
         _ddl('ALTER TABLE "public"."orders" ADD COLUMN "discount" INTEGER'),
     )
     assert decision.action == "evolve"
+    assert decision.kind == "ALTER"
     assert "discount" in decision.details
+
+
+def test_ddl_stats_decisions_bounded() -> None:
+    handler = DdlHandler()
+    for i in range(150):
+        handler.handle(_ddl(f"ALTER TABLE public.orders ADD COLUMN col_{i} INT"))
+    assert handler.stats.add_columns == 150
+    assert len(handler.stats.decisions) == 100

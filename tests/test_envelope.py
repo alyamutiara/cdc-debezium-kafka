@@ -154,3 +154,59 @@ def test_source_table_and_schema() -> None:
     assert parsed.data is not None
     assert parsed.data.table == "orders"
     assert parsed.data.schema == "public"
+
+
+def test_parse_top_level_payload_ddl_event() -> None:
+    raw = {
+        "payload": {
+            "ddl": "ALTER TABLE public.orders ADD COLUMN coupon TEXT",
+            "source": {
+                "db": "ecommerce",
+                "schema": "public",
+                "table": "orders",
+            },
+            "ts_ms": 1700000000000,
+        }
+    }
+    parsed = parse_event(json.dumps(raw).encode())
+    assert parsed.data is None
+    assert parsed.ddl is not None
+    assert parsed.ddl.kind == "ALTER"
+    assert "coupon" in parsed.ddl.ddl
+
+
+def test_parse_event_extracts_row_schema() -> None:
+    raw = {
+        "schema": {
+            "type": "struct",
+            "fields": [
+                {
+                    "type": "struct",
+                    "optional": True,
+                    "field": "after",
+                    "fields": [
+                        {"type": "int32", "optional": False, "field": "id"},
+                        {
+                            "type": "int64",
+                            "optional": False,
+                            "name": "org.apache.kafka.connect.data.Timestamp",
+                            "version": 1,
+                            "field": "created_at",
+                        },
+                        {"type": "int32", "optional": True, "field": "discount"},
+                    ],
+                }
+            ],
+        },
+        "payload": {
+            "op": "c",
+            "before": None,
+            "after": {"id": 1, "created_at": 1700000000000, "discount": None},
+            "source": {"db": "ecommerce", "schema": "public", "table": "orders"},
+        },
+    }
+    parsed = parse_event(json.dumps(raw).encode())
+    assert parsed.data is not None
+    assert parsed.data.row_schema is not None
+    assert parsed.data.row_schema["discount"] == {"type": "int32", "optional": True, "field": "discount"}
+    assert parsed.data.row_schema["created_at"]["name"] == "org.apache.kafka.connect.data.Timestamp"
